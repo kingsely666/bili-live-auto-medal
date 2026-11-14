@@ -24,7 +24,7 @@
 
 ## 安装
 
-- 推荐：从 Greasy Fork 安装，脚本名为「B站直播｜粉丝牌面板 + 进房自动换牌」。
+- 推荐：从 Greasy Fork 安装 https://greasyfork.org/zh-CN/scripts/605540 （B站直播｜粉丝牌面板 + 进房自动换牌）。
 - jsDelivr 直链（国内可直连）：https://cdn.jsdelivr.net/gh/kingsely666/bili-live-auto-medal@main/bilibili-live-auto-medal.user.js
 - GitHub raw：https://raw.githubusercontent.com/kingsely666/bili-live-auto-medal/main/bilibili-live-auto-medal.user.js
 - 手动：在脚本管理器中新建脚本，粘贴本仓库的 `bilibili-live-auto-medal.user.js`。
