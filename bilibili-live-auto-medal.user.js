@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播｜粉丝牌面板 + 进房自动换牌
 // @namespace    https://github.com/kingsely666/bili-live-auto-medal
-// @version      2.4.0
-// @description  点 B 站原生粉丝牌图标即可展开完整粉丝牌面板：全部徽章、头像、等级、亲密度进度、今日亲密度、佩戴中/当前房间/最近获得标记、点击切换、再点取消、滚动翻页、搜索、跳主播空间/直播间；并支持进直播间自动换上该主播的粉丝牌。设置项在直播页面内的设置窗口中修改，点「保存」后生效。全部直接调 B 站官方接口，不替换页面节点，B 站改版也不会失效。
+// @version      2.5.0
+// @description  展示完整粉丝牌面板：全部徽章、头像、等级、亲密度进度、今日亲密度、佩戴中/当前房间/最近获得标记、点击切换、再点取消、滚动翻页、搜索、跳主播空间/直播间；并支持进直播间自动换上该主播的粉丝牌。点聊天框旁的「牌」小按钮或按 Alt+M 展开面板，设置项在页面内设置窗口修改、点「保存」后生效。全部直接调 B 站官方接口，不替换页面节点。
 // @author       WorkBuddy
 // @match        *://live.bilibili.com/*
 // @run-at       document-start
@@ -25,19 +25,24 @@
  *     · 换牌/取消佩戴：直接 POST 官方 fansMedal/wear、fansMedal/take_off
  *     · 列表数据：直接 GET 官方 fansMedal/panel（分页 + special_list）
  *     · 当前佩戴 / 当前房间牌子 / 最近获得：全部从接口返回值判断
- *   入口接管原生粉丝牌图标：**不插节点、不替换原生按钮**，只在 document 捕获阶段拦 click，
- *   所以 Vue 重渲染抹不掉（旧脚本正是「替换原生节点」才被重渲染搞死）。
- *   mousedown 一律不碰 —— 拦了会让 B 站原生组件的按下/悬停状态错乱，表现为"原版功能不对"。
- *   面板贴屏幕右侧栏、底边停在输入框上方，不压播放器也不压输入框。
+ *   入口是聊天框右侧的「牌」小按钮（Alt+M 等效）：挂 body + position:fixed，
+ *   优先落在右侧栏外那条空白边距里、与输入行同高 —— 不压视频、不压聊天、不压输入框，
+ *   面板展开时也遮不到它。按钮插在 body 上，Vue 重渲染抹不掉，定时自检发现丢了就补回来。
+ *   页面若还有原生粉丝牌图标，拦 click 也能接管（只拦 click，mousedown 一律不碰，
+ *   否则 B 站原生组件的按下/悬停状态会错乱）；新版直播间已经没有这个图标了。
+ *   面板收进右侧栏、底边停在输入框上方，小屏也不会溢出视口。
  *   想用原版弹窗时点面板里的「B站原版」，脚本放开拦截 15 秒并把原生图标高亮出来，
  *   再点一次即可（真实点击，行为与原版完全一致）；点进去后自动续到 60 秒，够把弹窗用完。
- *   原生图标改版找不到了，会自动退回一个悬浮小按钮兜底，保证永远进得去（Alt+M 始终可用）。
  *
  * 只读接口 + 只发「佩戴/取消佩戴」两个请求。不发弹幕、不送礼、不改页面业务逻辑。
  */
 
 /*
  * 更新日志：
+ *   2.5.0  跟进直播间前端改版（blfe-live-room）：入口「牌」按钮改挂到右侧栏外那条空白边距，
+ *          与输入行同高，不再压视频画面、也不再被面板遮住；面板横向收进右侧栏；
+ *          默认入口改为悬浮按钮，老配置的 native/both 自动回落，避免「两个入口都没有」；
+ *          设置窗口在小屏上不再溢出视口
  *   2.4.0  设置改为网页内设置窗口，改动存草稿、点「保存」后生效；菜单固定 2 项；
  *          面板底部增加「设置」入口；默认牌支持下拉选择、用当前房间的牌子、清除
  *   2.3.1  「B站原版」放行 15 秒，命中后续到 60 秒；高亮持续到真正点到为止
@@ -51,6 +56,10 @@
   'use strict';
 
   // ==================== 配置 ====================
+  // 版本号只认元数据里那一处，避免文案里的号跟 @version 跑偏
+  const VER = (typeof GM_info === 'object' && GM_info && GM_info.script && GM_info.script.version)
+    ? GM_info.script.version
+    : '2.5.0';
   const CFG_KEY = 'blam_cfg_v2';
   const DEFAULTS = {
     enabled: true,          // 进房自动换牌
@@ -58,9 +67,12 @@
     fallbackDefault: false, // 没这个主播的牌子时切回默认牌
     defaultMedalId: 0,
     defaultMedalName: '',
-    entryMode: 'native'     // native=接管原生粉丝牌图标 | float=悬浮小按钮 | both=两者都有
+    entryMode: 'float'      // float=悬浮小按钮（默认）| both=两者都有 | native=接管原生图标（新版页面已无该图标）
   };
   let cfg = Object.assign({}, DEFAULTS, loadCfg());
+  // 新版直播间已经移除原生粉丝牌图标：老配置里存的 native / both 一律按 float 处理，
+  // 否则会出现「按钮入口没有、原生图标也没有」的死局。
+  if (cfg.entryMode === 'native' || cfg.entryMode === 'both') cfg.entryMode = 'float';
 
   function loadCfg() {
     try {
@@ -914,7 +926,10 @@
     setBtn.textContent = '设置';
     setBtn.title = '在页面上打开设置窗口，改完点「保存」才生效';
     setBtn.onclick = openSettings;
-    foot.appendChild(off); foot.appendChild(nativeBtn); foot.appendChild(setBtn); foot.appendChild(center);
+    foot.appendChild(off);
+    // 新版直播间把原生粉丝牌图标去掉了，没有可点的原版入口 → 这个按钮不摆出来
+    if (findNativeEl(true)) foot.appendChild(nativeBtn);
+    foot.appendChild(setBtn); foot.appendChild(center);
 
     panelEl.appendChild(head);
     panelEl.appendChild(searchWrap);
@@ -986,8 +1001,9 @@
   // 右侧栏外框候选：从最外层容器到最内层，取第一个「像侧栏」的
   const ASIDE_SEL = [
     '#aside-area', '#aside-area-vm', '.aside-area',
-    '#chat-history-list', '.chat-history-list', '.chat-history-panel',
-    '.chat-input-ctnr', '.chat-input-ctnr-new',
+    '#chat-history-panel', '#chat-history-list', '.chat-history-panel', '.chat-history-list',
+    '#control-panel-ctnr-box', '.control-panel-ctnr',
+    '.chat-main-row', '.chat-input-ctnr', '.chat-input-ctnr-new',
     '#chat-control-panel-vm', '.chat-control-panel'
   ];
 
@@ -1007,8 +1023,10 @@
 
   // 聊天输入框（面板的垂直锚点：底边停在它上面）
   const INPUT_SEL = [
+    '.chat-main-row',
     '.chat-input-ctnr', '.chat-input-ctnr-new',
-    '.chat-input-panel', '#chat-control-panel-vm', '.chat-control-panel'
+    '.chat-input-panel', '#control-panel-ctnr-box',
+    '#chat-control-panel-vm', '.chat-control-panel'
   ];
   function inputRect() {
     for (let i = 0; i < INPUT_SEL.length; i++) {
@@ -1037,14 +1055,13 @@
     const aside = asideRect();
     const input = inputRect();
 
-    // —— 水平：右边缘贴窗口右边 8px，宽度收进侧栏宽度里 ——
+    // —— 水平：把面板收进右侧栏，右边缘离侧栏右边 8px ——
     // 侧栏本身没贴到窗口右边（窄屏居中 / 有边距）时跟着侧栏走，免得面板悬在空白处。
     let w = PANEL_W;
     let right = margin;
     if (aside) {
       w = Math.max(240, Math.min(PANEL_W, Math.round(aside.width) - 16));
-      const gapRight = Math.round(vw - aside.right);
-      if (gapRight > 24) right = gapRight + margin;
+      right = Math.max(margin, Math.round(vw - aside.right) + margin);
     }
 
     // —— 垂直：底边停在输入框上沿 ——
@@ -1515,14 +1532,19 @@
   // ==================== 悬浮小入口（备用） ====================
   // 只在「明确要求悬浮按钮」或「原生图标找不到」时出现。
   // 一律挂在 body 上 + position:fixed：插进 B 站 Vue 的 DOM 里会被重渲染抹掉。
+  // 悬浮入口的锚点：新版直播间把原生粉丝牌图标从输入区去掉了，
+  // 这里改为锚「输入行 / 右侧图标区」，按钮贴着输入行右上角挂，不再算到播放器画面上。
   const ANCHORS = [
     '.chat-input-ctnr .medal-section',
     '.chat-input-ctnr-new .medal-section',
     '.medal-section',
     '#medal-selector',
+    '.chat-main-row',
     '.chat-input-ctnr',
     '.chat-input-ctnr-new',
+    '.icon-right-part',
     '.chat-control-panel',
+    '#control-panel-ctnr-box',
     '#chat-control-panel-vm'
   ];
 
@@ -1541,16 +1563,36 @@
   function positionEntry(btn) {
     const vw = window.innerWidth || 1280;
     const vh = window.innerHeight || 800;
-    const r = findAnchorRect();
+    const aside = asideRect();
+    const input = inputRect();
     let left, top;
-    if (r) {
-      left = Math.round(r.left - 30);
-      if (left < 4) left = Math.round(r.right + 4);
-      top = Math.round(r.top + (r.height - 26) / 2);
+
+    // 优先：挂在右侧栏右边那条空白边距里（与输入行同高）。
+    // 这块地方永远是空的 —— 不压视频、不压聊天、不压输入框，面板打开时也遮不到它。
+    const gutter = aside ? Math.round(vw - aside.right) : 0;
+    if (aside && gutter >= 34) {
+      left = Math.round(aside.right + 6);
+      top = input ? Math.round(input.top + (input.height - 26) / 2)
+                  : Math.round(aside.bottom - 40);
+    } else if (aside && input) {
+      // 侧栏贴着窗口右边（没有边距）→ 退而挂在输入行正上方、侧栏右端
+      left = Math.round(aside.right - 34);
+      top = Math.round(input.top - 32);
+      if (top < aside.top + 4) top = Math.round(aside.top + 4);
+    } else if (input) {
+      left = Math.round(input.right - 34);
+      top = Math.round(input.top - 32);
     } else {
-      // 找不到聊天框就钉在右下角，保证任何时候都能点到
-      left = vw - 44;
-      top = vh - 160;
+      const r = findAnchorRect();
+      if (r) {
+        left = Math.round(r.left - 30);
+        if (left < 4) left = Math.round(r.right + 4);
+        top = Math.round(r.top + (r.height - 26) / 2);
+      } else {
+        // 找不到聊天框就钉在右下角，保证任何时候都能点到
+        left = vw - 44;
+        top = vh - 160;
+      }
     }
     if (left < 4) left = 4;
     if (left > vw - 30) left = vw - 30;
@@ -1607,7 +1649,7 @@
       '时间: ' + new Date().toLocaleString(),
       '页面: ' + location.href,
       '房间号: ' + (readRoomId() || '未识别'),
-      '脚本版本: 2.4.0',
+      '脚本版本: ' + VER,
       '登录 bili_jct: ' + (getCookie('bili_jct') ? '有' : '没有'),
       '登录 DedeUserID: ' + (getCookie('DedeUserID') || '没有'),
       '请求通道: GM_xmlhttpRequest=' + (typeof GM_xmlhttpRequest === 'function') + ' fetch=' + (typeof fetch === 'function'),
@@ -1754,7 +1796,7 @@
 
     const head = stEl('div', 'blam-st-head');
     head.appendChild(stEl('div', 'blam-st-title', '粉丝牌助手 · 设置'));
-    head.appendChild(stEl('div', 'blam-st-tip', 'v2.4.0'));
+    head.appendChild(stEl('div', 'blam-st-tip', 'v' + VER));
     const closeBtn = stEl('div', 'blam-st-close', '×');
     closeBtn.title = '放弃未保存的修改并关闭';
     closeBtn.onclick = function () { closeSettings(true); };
@@ -1893,9 +1935,9 @@
 
     body.appendChild(stEl('div', 'blam-st-sec', '面板入口'));
     addSelectRow(body, '打开方式', '决定从哪里打开粉丝牌面板，改完需点「保存」', [
-      { value: 'native', label: 'B 站原生粉丝牌图标（推荐）' },
-      { value: 'float', label: '悬浮小按钮「牌」' },
-      { value: 'both', label: '两者都有' }
+      { value: 'float', label: '悬浮小按钮「牌」（推荐）' },
+      { value: 'both', label: '悬浮按钮 + 原生图标' },
+      { value: 'native', label: '仅 B 站原生粉丝牌图标（当前页面已无此图标）' }
     ], 'entryMode');
 
     body.appendChild(stEl('div', 'blam-st-sec', '快捷操作'));
